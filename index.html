@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Хроники Подземелья</title>
+<style>
+  body { margin:0; background:#000; overflow:hidden; font-family:monospace; }
+  canvas { display:block; margin:0 auto; image-rendering: pixelated; }
+  #ui { position:absolute; top:10px; left:10px; color:#fff; font-size:14px; text-shadow:1px 1px 2px #000; pointer-events:none; }
+  #ui div { margin:4px 0; }
+  #hint { position:absolute; bottom:10px; left:10px; color:#aaa; font-size:12px; }
+  #inv { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+         background:rgba(10,10,20,0.95); border:3px solid #3af; padding:15px;
+         display:none; color:#fff; width:520px; }
+  #inv h3 { margin:0 0 10px; color:#3af; }
+  #invGrid { display:grid; grid-template-columns:repeat(5, 1fr); gap:6px; }
+  .slot { width:80px; height:80px; background:#222; border:2px solid #444;
+          display:flex; flex-direction:column; align-items:center; justify-content:center;
+          cursor:pointer; font-size:10px; text-align:center; position:relative; }
+  .slot:hover { border-color:#3af; }
+  .slot .icon { font-size:24px; }
+  .slot .rar { font-size:9px; }
+  .r-common { color:#8af; }
+  .r-epic { color:#a0f; }
+  .r-myth { color:#f80; }
+  .r-leg { color:#ffd700; }
+  #closeInv { margin-top:10px; padding:8px 16px; background:#3af; border:none;
+              color:#fff; cursor:pointer; font-family:monospace; }
+  #toast { position:absolute; top:100px; left:50%; transform:translateX(-50%);
+           color:#ffd700; font-size:18px; text-shadow:2px 2px 4px #000;
+           pointer-events:none; opacity:0; transition:opacity 0.3s; }
+</style>
+</head>
+<body>
+<canvas id="c" width="960" height="540"></canvas>
+<div id="ui">
+  <div>❤️ HP: <span id="hp">300</span> / <span id="maxhp">300</span></div>
+  <div>⚡ SP: <span id="sp">150</span> / <span id="maxsp">150</span></div>
+  <div>🍖 Голод: <span id="food">100</span></div>
+  <div>🔥 Искры: <span id="sparks">3</span></div>
+  <div>💎 Рубины: <span id="ruby">0</span></div>
+  <div>🗺️ Биом: <span id="biome">Неоновые пещеры</span></div>
+  <div>👑 Босс: <span id="boss">—</span></div>
+  <div>📦 Ящики: <span id="boxes">0</span></div>
+</div>
+<div id="hint">A/D — ходьба | W — прыжок | E — рывок | Q — блок | J/ЛКМ — атака | I — инвентарь | F — открыть ящик</div>
+<div id="toast"></div>
+
+<div id="inv">
+  <h3>🎒 ИНВЕНТАРЬ — 💎 <span id="invRuby">0</span></h3>
+  <div id="invGrid"></div>
+  <button id="closeInv">ЗАКРЫТЬ (I)</button>
+</div>
+
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const W = c.width, H = c.height;
+
+// ================== ИГРОК ==================
+const player = {
+  x: W/2, y: H/2, w: 24, h: 40,
+  vx: 0, vy: 0,
+  hp: 300, maxHp: 300,
+  sp: 150, maxSp: 150,
+  food: 100,
+  speed: 3.2,
+  jump: -11,
+  onGround: false,
+  facing: 1,
+  dashCD: 0, block: false,
+  sparks: 3,
+  ruby: 0,
+  boxes: 0,
+  invuln: 0,
+  anim: 0,
+  attackCD: 0,
+  flash: 0
+};
+
+// ================== МИР ==================
+const world = {
+  biome: 0,
+  biomes: ['Неоновые пещеры','Паучье гнездо','Бездна','Разлом Барьера'],
+  depth: 0,
+  tiles: [],
+  ores: [],
+  particles: [],
+  mobs: [],
+  chests: [],
+  drops: [],
+  boss: null,
+  bossActive: false,
+  keys: {}
+};
+
+const TILE = 40;
+const COLS = Math.ceil(W/TILE), ROWS = Math.ceil(H/TILE);
+
+// ================== ИНВЕНТАРЬ ==================
+const inventory = { items: [], maxSlots: 20 };
+
+const RARITIES = {
+  common: { name:'Редкое', cls:'r-common', mult:1, color:'#8af' },
+  epic:   { name:'Эпическое', cls:'r-epic', mult:1.5, color:'#a0f' },
+  myth:   { name:'Мифическое', cls:'r-myth', mult:2, color:'#f80' },
+  leg:    { name:'Легендарное', cls:'r-leg', mult:3, color:'#ffd700' }
+};
+
+// Предметы (оружие, броня, кирки, щиты)
+const ITEM_POOL = {
+  weapon: [
+    { name:'Меч',    icon:'🗡️', base:10 },
+    { name:'Копьё',  icon:'🔱', base:14 },
+    { name:'Топор',  icon:'🪓', base:18 },
+    { name:'Лук',    icon:'🏹', base:8 }
+  ],
+  armor: [
+    { name:'Шлем',      icon:'🪖', base:3 },
+    { name:'Нагрудник', icon:'🎽', base:5 },
+    { name:'Штаны',     icon:'👖', base:4 },
+    { name:'Ботинки',   icon:'🥾', base:2 }
+  ],
+  pick: [
+    { name:'Кирка', icon:'⛏️', base:1 }
+  ],
+  shield: [
+    { name:'Щит', icon:'🛡️', base:50 }
+  ],
+  skin: [
+    { name:'Скин: Ниндзя',   icon:'🥷' },
+    { name:'Скин: Робот',    icon:'🤖' },
+    { name:'Скин: Король',   icon:'👑' },
+    { name:'Скин: Маг',      icon:'🧙' }
+  ]
+};
+
+function randomRarity() {
+  const r = Math.random();
+  if (r < 0.60) return 'common';
+  if (r < 0.85) return 'epic';
+  if (r < 0.97) return 'myth';
+  return 'leg';
+}
+
+function generateItem() {
+  const cats = ['weapon','armor','pick','shield','skin'];
+  const cat = cats[Math.floor(Math.random()*cats.length)];
+  const base = ITEM_POOL[cat][Math.floor(Math.random()*ITEM_POOL[cat].length)];
+  const rarity = randomRarity();
+  const level = 1;
+  const stat = base.base ? Math.floor(base.base * RARITIES[rarity].mult) : 0;
+  return {
+    cat, name: base.name, icon: base.icon,
+    rarity, level, stat,
+    upgradeCost: 200,
+    id: Math.random()
+  };
+}
+
+function addItem(item) {
+  if (inventory.items.length >= inventory.maxSlots) {
+    showToast('❌ Инвентарь полон!');
+    return false;
+  }
+  inventory.items.push(item);
+  renderInventory();
+  return true;
+}
+
+function renderInventory() {
+  const grid = document.getElementById('invGrid');
+  grid.innerHTML = '';
+  for (let i=0; i<inventory.maxSlots; i++) {
+    const slot = document.createElement('div');
+    slot.className = 'slot';
+    const item = inventory.items[i];
+    if (item) {
+      const r = RARITIES[item.rarity];
+      slot.innerHTML = `
+        <div class="icon">${item.icon}</div>
+        <div class="${r.cls}">${r.name}</div>
+        <div style="font-size:9px;">${item.name} Ур.${item.level}</div>
+        ${item.stat ? `<div style="font-size:9px;color:#0f0;">+${item.stat}</div>` : ''}
+      `;
+      slot.onclick = () => upgradeItem(item);
+    } else {
+      slot.innerHTML = `<div style="color:#555;">пусто</div>`;
+    }
+    grid.appendChild(slot);
+  }
+  document.getElementById('invRuby').textContent = player.ruby;
+}
+
+function upgradeItem(item) {
+  if (item.level >= 6) { showToast('✅ Максимальный уровень!'); return; }
+  const cost = item.upgradeCost;
+  if (player.ruby < cost) { showToast(`❌ Нужно ${cost} 💎`); return; }
+  player.ruby -= cost;
+  item.level++;
+  item.stat = Math.floor(item.stat * 1.15) + 1;
+  item.upgradeCost = cost + 200;
+  showToast(`⚒️ ${item.name} → Ур.${item.level}!`);
+  renderInventory();
+  updateUI();
+}
+
+function showToast(text) {
+  const t = document.getElementById('toast');
+  t.textContent = text;
+  t.style.opacity = 1;
+  clearTimeout(t._t);
+  t._t = setTimeout(() => t.style.opacity = 0, 1500);
+}
+
+function toggleInventory() {
+  const inv = document.getElementById('inv');
+  inv.style.display = inv.style.display === 'block' ? 'none' : 'block';
+  if (inv.style.display === 'block') renderInventory();
+}
+
+// ================== ЯЩИКИ ==================
+function spawnChest(x, y) {
+  world.chests.push({ x, y, opened:false, bob:Math.random()*6 });
+}
+
+function openChest(chest) {
+  if (chest.opened) return;
+  chest.opened = true;
+  const item = generateItem();
+  addItem(item);
+  addParticles(chest.x, chest.y, 30, RARITIES[item.rarity].color);
+  showToast(`📦 ${item.icon} ${item.name} (${RARITIES[item.rarity].name})`);
+}
+
+function handleChests() {
+  const k = world.keys;
+  if (k['f']) {
+    k['f'] = false;
+    for (const ch of world.chests) {
+      if (ch.opened) continue;
+      if (Math.hypot(ch.x-player.x, ch.y-player.y) < 60) {
+        openChest(ch);
+        break;
+      }
+    }
+    // Открыть ящик из запаса
+    if (player.boxes > 0 && world.chests.every(c => c.opened)) {
+      player.boxes--;
+      const item = generateItem();
+      addItem(item);
+      showToast(`📦 ${item.icon} ${item.name} (${RARITIES[item.rarity].name})`);
+      updateUI();
+    }
+  }
+}
+
+// ================== ТАЙЛЫ ==================
+function genTiles() {
+  world.tiles = [];
+  for (let y=0; y<ROWS; y++) {
+    world.tiles[y] = [];
+    for (let x=0; x<COLS; x++) {
+      let solid = (y===ROWS-1 || y===0 || Math.random()<0.05);
+      world.tiles[y][x] = { solid, hp: 100 };
+    }
+  }
+  world.ores = [];
+  const oreTypes = [
+    {name:'Медь', color:'#b87333', chance:0.06},
+    {name:'Железо', color:'#888', chance:0.05},
+    {name:'Золото', color:'#ffd700', chance:0.03},
+    {name:'Сапфир', color:'#1e90ff', chance:0.02},
+    {name:'Изумруд', color:'#0f0', chance:0.02},
+    {name:'Алмаз', color:'#aef', chance:0.01},
+    {name:'Аметист', color:'#a020f0', chance:0.015},
+    {name:'Уголь', color:'#333', chance:0.07}
+  ];
+  for (let y=2; y<ROWS-1; y++) {
+    for (let x=0; x<COLS; x++) {
+      if (world.tiles[y][x].solid && Math.random()<0.15) {
+        for (const o of oreTypes) {
+          if (Math.random()<o.chance) {
+            world.ores.push({x:x*TILE+TILE/2, y:y*TILE+TILE/2, type:o.name, color:o.color, hp:50});
+            break;
+          }
+        }
+      }
+    }
+  }
+  // Ящики в мире
+  world.chests = [];
+  for (let i=0; i<3; i++) {
+    spawnChest(100 + Math.random()*(W-200), 100 + Math.random()*(H-200));
+  }
+}
+
+// ================== МОБЫ ==================
+const mobTypes = {
+  slime:    {name:'Слизень',   color:'#3fa9f5', w:20,h:20, hp:15, dmg:4,  speed:1.2, ai:'jump'},
+  rat:      {name:'Крыса',     color:'#777',    w:20,h:12, hp:12, dmg:3,  speed:2.5, ai:'chase'},
+  zombie:   {name:'Зомби',     color:'#4a7',    w:20,h:36, hp:30, dmg:7,  speed:1,   ai:'chase'},
+  spider:   {name:'Паук',      color:'#222',    w:22,h:18, hp:18, dmg:5,  speed:2,   ai:'chase'},
+  lizard:   {name:'Ящер',      color:'#2a6',    w:26,h:18, hp:30, dmg:8,  speed:2.2, ai:'chase'},
+  fish:     {name:'Рыба',      color:'#26c',    w:24,h:12, hp:25, dmg:8,  speed:3,   ai:'chase'},
+  shadow:   {name:'Тень',      color:'#000',    w:28,h:28, hp:50, dmg:15, speed:1.5, ai:'chase'}
+};
+
+function spawnMob(type, x, y) {
+  const t = mobTypes[type];
+  world.mobs.push({...t, x, y, vx:0, vy:0, onGround:false, flash:0, anim:0});
+}
+
+// ================== БОССЫ ==================
+const bosses = {
+  godzilla: {name:'Годзилла', color:'#111', spike:'#3af', w:80, h:70, hp:1500, maxHp:1500, dmg:35, speed:1.2},
+  tarantula:{name:'Тарантул', color:'#432', w:70, h:50, hp:1800, maxHp:1800, dmg:35, speed:1.8},
+  kraken:   {name:'Кракен',  color:'#123', w:90, h:80, hp:2200, maxHp:2200, dmg:40, speed:1.5},
+  eren:     {name:'Эрен',    color:'#333', w:50, h:60, hp:3000, maxHp:3000, dmg:55, speed:2}
+};
+
+function spawnBoss(key) {
+  const b = {...bosses[key]};
+  b.x = W/2; b.y = 120; b.vx=0; b.vy=0; b.flash=0; b.anim=0;
+  world.boss = b;
+  world.bossActive = true;
+  document.getElementById('boss').textContent = b.name;
+  addParticles(b.x, b.y, 60, '#fff');
+  showToast(`👑 БОСС: ${b.name}!`);
+}
+
+// ================== ЧАСТИЦЫ ==================
+function addParticles(x, y, count, color) {
+  for (let i=0; i<count; i++) {
+    world.particles.push({
+      x, y,
+      vx:(Math.random()-0.5)*6,
+      vy:(Math.random()-0.5)*6,
+      life:30+Math.random()*30,
+      color, size:2+Math.random()*4
+    });
+  }
+}
+
+// ================== ФИЗИКА ==================
+const G = 0.5;
+function tileAt(px, py) {
+  const x = Math.floor(px/TILE), y = Math.floor(py/TILE);
+  if (y<0||y>=ROWS||x<0||x>=COLS) return null;
+  return world.tiles[y][x];
+}
+function collide(e) {
+  e.onGround = false;
+  e.x += e.vx;
+  if (tileAt(e.x-e.w/2, e.y)?.solid || tileAt(e.x+e.w/2, e.y)?.solid) e.vx *= -0.5;
+  e.y += e.vy;
+  const bottom = tileAt(e.x, e.y+e.h/2);
+  const top = tileAt(e.x, e.y-e.h/2);
+  if (bottom?.solid && e.vy>0) { e.y = Math.floor((e.y+e.h/2)/TILE)*TILE - e.h/2; e.vy=0; e.onGround=true; }
+  if (top?.solid && e.vy<0) { e.y = Math.floor((e.y-e.h/2)/TILE)*TILE + TILE + e.h/2; e.vy=0; }
+  if (e.y > H-30) { e.y = H-30; e.vy=0; e.onGround=true; }
+}
+
+// ================== УПРАВЛЕНИЕ ==================
+document.addEventListener('keydown', e => {
+  world.keys[e.key.toLowerCase()] = true;
+  if (e.key.toLowerCase() === 'i') toggleInventory();
+});
+document.addEventListener('keyup', e => world.keys[e.key.toLowerCase()] = false);
+
+function handleInput() {
+  const k = world.keys;
+  if (player.attackCD>0) player.attackCD--;
+  if (player.dashCD>0) player.dashCD--;
+  if (player.invuln>0) player.invuln--;
+  if (player.flash>0) player.flash--;
+
+  player.block = k['q'] && player.sp > 0;
+  let speed = player.speed;
+  if (player.block) speed *= 0.3;
+
+  player.vx = 0;
+  if (k['a']||k['arrowleft']) { player.vx = -speed; player.facing=-1; }
+  if (k['d']||k['arrowright']) { player.vx = speed; player.facing=1; }
+
+  if ((k[' ']||k['w']||k['arrowup']) && player.onGround) { player.vy = player.jump; }
+
+  if (k['e'] && player.dashCD<=0 && player.sp>=20) {
+    player.vx = player.facing * 15;
+    player.sp -= 20;
+    player.dashCD = 40;
+    addParticles(player.x, player.y, 10, '#a0f');
+  }
+
+  if ((k['j']||k['mouse']) && player.attackCD<=0) {
+    player.attackCD = 18;
+    attack();
+  }
+
+  if (player.block) player.sp = Math.max(0, player.sp-0.3);
+  else player.sp = Math.min(player.maxSp, player.sp+0.15);
+
+  player.food -= 0.01;
+  if (player.food <= 0) { player.hp -= 0.05; player.food = 0; }
+  player.food = Math.max(0, player.food);
+
+  handleChests();
+}
+
+function attack() {
+  const range = 50;
+  const ax = player.x + player.facing * range/2;
+  const ay = player.y;
+  addParticles(ax, ay, 8, '#ff0');
+
+  // Сила атаки зависит от экипированного оружия
+  let dmg = 25;
+  const weapon = inventory.items.find(i => i.cat==='weapon');
+  if (weapon) dmg = weapon.stat + weapon.level*3;
+
+  for (const m of world.mobs) {
+    if (Math.abs(m.x-ax)<range/2+10 && Math.abs(m.y-ay)<40) {
+      m.hp -= dmg; m.flash = 8; m.vx = player.facing*5;
+      addParticles(m.x, m.y, 10, '#f00');
+      if (m.hp<=0) {
+        m.dead = true;
+        addParticles(m.x, m.y, 20, m.color);
+        player.ruby += 1;
+        if (Math.random() < 0.1) {
+          player.boxes++;
+          showToast('📦 +1 ящик!');
+        }
+      }
+    }
+  }
+
+  if (world.boss && !world.boss.dead) {
+    const b = world.boss;
+    if (Math.abs(b.x-ax)<range/2+b.w/2 && Math.abs(b.y-ay)<b.h) {
+      b.hp -= dmg; b.flash = 8;
+      addParticles(b.x, b.y, 15, '#f00');
+      if (b.hp<=0) {
+        b.dead = true;
+        addParticles(b.x, b.y, 80, '#fff');
+        player.ruby += 200;
+        player.boxes += 3;
+        showToast('🏆 БОСС ПОВЕРЖЕН! +200💎 +3📦');
+        world.bossActive = false;
+        document.getElementById('boss').textContent = '—';
+        world.biome++;
+        if (world.biome < world.biomes.length) {
+          document.getElementById('biome').textContent = world.biomes[world.biome];
+          nextBiome();
+        } else {
+          setTimeout(() => alert('🏆 ПОБЕДА! Ты пробил Барьер!'), 500);
+        }
+      }
+    }
+  }
+
+  for (const o of world.ores) {
+    if (!o.dead && Math.abs(o.x-ax)<range/2+10 && Math.abs(o.y-ay)<40) {
+      o.hp -= dmg;
+      addParticles(o.x, o.y, 5, o.color);
+      if (o.hp<=0) { o.dead=true; player.ruby += 1; }
+    }
+  }
+}
+
+function nextBiome() {
+  world.mobs = [];
+  world.ores = [];
+  genTiles();
+  const types = [['slime','rat','zombie','spider'],
+                 ['spider','lizard','zombie'],
+                 ['fish','shadow','spider'],
+                 ['shadow','spider','zombie']][world.biome];
+  for (let i=0; i<8; i++) {
+    spawnMob(types[Math.floor(Math.random()*types.length)],
+             Math.random()*W, 100+Math.random()*300);
+  }
+  const bossKeys = ['godzilla','tarantula','kraken','eren'];
+  setTimeout(() => spawnBoss(bossKeys[world.biome]), 5000);
+}
+
+// ================== ОБНОВЛЕНИЕ ==================
+function update() {
+  handleInput();
+  collide(player);
+  player.vy += G;
+  player.anim += Math.abs(player.vx)*0.1 + 0.05;
+
+  for (const m of world.mobs) {
+    if (m.dead) continue;
+    m.anim += 0.1;
+    if (m.flash>0) m.flash--;
+    const dx = player.x - m.x, dy = player.y - m.y;
+    const dist = Math.hypot(dx,dy);
+    if (dist < 400) {
+      if (m.ai==='chase') {
+        m.vx = (dx/dist)*m.speed;
+        if (m.onGround && Math.random()<0.02) m.vy = -8;
+      } else if (m.ai==='jump') {
+        if (m.onGround) { m.vx = (dx/dist)*m.speed; m.vy = -7; }
+      }
+      if (dist < m.w/2+player.w/2 && player.invuln<=0) {
+        let dmg = m.dmg;
+        if (player.block) dmg *= 0.5;
+        // Броня снижает урон
+        const armor = inventory.items.filter(i=>i.cat==='armor').reduce((s,i)=>s+i.stat,0);
+        dmg = Math.max(1, dmg - armor*0.3);
+        player.hp -= dmg;
+        player.invuln = 40;
+        player.flash = 8;
+        addParticles(player.x, player.y, 10, '#f00');
+      }
+    }
+    m.vy += G;
+    collide(m);
+    if (m.y > H+100) m.dead = true;
+  }
+  world.mobs = world.mobs.filter(m => !m.dead);
+
+  if (world.boss && !world.boss.dead) {
+    const b = world.boss;
+    b.anim += 0.05;
+    if (b.flash>0) b.flash--;
+    const dx = player.x-b.x, dy = player.y-b.y;
+    const dist = Math.hypot(dx,dy);
+    b.vx = (dx/dist)*b.speed;
+    b.vy += G*0.3;
+    if (b.y > H-200) b.vy = -3;
+    collide(b);
+    if (dist < b.w/2+player.w/2 && player.invuln<=0) {
+      let dmg = b.dmg;
+      if (player.block) dmg *= 0.5;
+      const armor = inventory.items.filter(i=>i.cat==='armor').reduce((s,i)=>s+i.stat,0);
+      dmg = Math.max(1, dmg - armor*0.3);
+      player.hp -= dmg;
+      player.invuln = 50;
+      player.flash = 8;
+      addParticles(player.x, player.y, 15, '#f00');
+    }
+  }
+
+  for (const p of world.particles) {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.life--;
+  }
+  world.particles = world.particles.filter(p => p.life>0);
+
+  if (player.hp <= 0) {
+    player.sparks--;
+    if (player.sparks <= 0) {
+      alert('💀 GAME OVER');
+      location.reload();
+    } else {
+      player.hp = player.maxHp;
+      player.x = W/2; player.y = 100;
+      player.invuln = 100;
+      addParticles(player.x, player.y, 40, '#0ff');
+    }
+    updateUI();
+  }
+
+  updateUI();
+}
+
+function updateUI() {
+  document.getElementById('hp').textContent = Math.max(0,Math.floor(player.hp));
+  document.getElementById('sp').textContent = Math.floor(player.sp);
+  document.getElementById('food').textContent = Math.floor(player.food);
+  document.getElementById('ruby').textContent = player.ruby;
+  document.getElementById('sparks').textContent = player.sparks;
+  document.getElementById('boxes').textContent = player.boxes;
+}
+
+// ================== РИСОВАНИЕ ==================
+function drawBackground() {
+  const colors = [
+    ['#0a0a2a','#1a1a4a'],
+    ['#1a0a0a','#2a1010'],
+    ['#000a1a','#00102a'],
+    ['#1a0020','#2a0030']
+  ][world.biome] || ['#0a0a2a','#1a1a4a'];
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0, colors[0]);
+  g.addColorStop(1, colors[1]);
+  ctx.fillStyle = g;
+  ctx.fillRect(0,0,W,H);
+
+  ctx.globalAlpha = 0.3;
+  for (let i=0; i<30; i++) {
+    const x = (i*137 + world.biome*50) % W;
+    const y = (i*89) % H;
+    ctx.fillStyle = ['#3af','#f0f','#0ff','#a0f'][world.biome] || '#3af';
+    ctx.beginPath();
+    ctx.arc(x, y, 2+Math.sin(Date.now()/1000+i)*1, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawTiles() {
+  for (let y=0; y<ROWS; y++) {
+    for (let x=0; x<COLS; x++) {
+      if (world.tiles[y]?.[x]?.solid) {
+        const grad = ctx.createLinearGradient(x*TILE, y*TILE, x*TILE, y*TILE+TILE);
+        grad.addColorStop(0, '#3a3a4a');
+        grad.addColorStop(1, '#1a1a2a');
+        ctx.fillStyle = grad;
+        ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
+        ctx.strokeStyle = '#0a0a1a';
+        ctx.strokeRect(x*TILE, y*TILE, TILE, TILE);
+      }
+    }
+  }
+}
+
+function drawOres() {
+  for (const o of world.ores) {
+    if (o.dead) continue;
+    const glow = ctx.createRadialGradient(o.x, o.y, 0, o.x, o.y, 20);
+    glow.addColorStop(0, o.color);
+    glow.addColorStop(1, 'transparent');
+    ctx.fillStyle = glow;
+    ctx.fillRect(o.x-20, o.y-20, 40, 40);
+    ctx.fillStyle = o.color;
+    ctx.beginPath();
+    ctx.moveTo(o.x, o.y-8);
+    ctx.lineTo(o.x+8, o.y);
+    ctx.lineTo(o.x, o.y+8);
+    ctx.lineTo(o.x-8, o.y);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function drawChests() {
+  for (const ch of world.chests) {
+    ch.bob += 0.05;
+    const yOff = Math.sin(ch.bob)*3;
+    // Свечение
+    if (!ch.opened) {
+      const glow = ctx.createRadialGradient(ch.x, ch.y+yOff, 0, ch.x, ch.y+yOff, 40);
+      glow.addColorStop(0, 'rgba(255,215,0,0.5)');
+      glow.addColorStop(1, 'transparent');
+      ctx.fillStyle = glow;
+      ctx.fillRect(ch.x-40, ch.y+yOff-40, 80, 80);
+    }
+    // Ящик
+    ctx.fillStyle = ch.opened ? '#333' : '#8b5a2b';
+    ctx.fillRect(ch.x-15, ch.y-12+yOff, 30, 24);
+    ctx.strokeStyle = '#5a3a1b';
+    ctx.strokeRect(ch.x-15, ch.y-12+yOff, 30, 24);
+    // Крышка
+    ctx.fillStyle = ch.opened ? '#222' : '#a06a3b';
+    ctx.fillRect(ch.x-15, ch.y-12+yOff, 30, 8);
+    // Замок
+    ctx.fillStyle = ch.opened ? '#666' : '#ffd700';
+    ctx.fillRect(ch.x-3, ch.y-2+yOff, 6, 6);
+    // Подсказка
+    if (!ch.opened && Math.hypot(ch.x-player.x, ch.y-player.y) < 60) {
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px monospace';
+      ctx.fillText('F — открыть', ch.x-30, ch.y-25+yOff);
+    }
+  }
+}
+
+function drawPlayer() {
+  const p = player;
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  if (p.flash>0) ctx.globalAlpha = 0.5;
+  const glow = ctx.createRadialGradient(0,0,0,0,0,100);
+  glow.addColorStop(0,'rgba(255,200,100,0.3)');
+  glow.addColorStop(1,'transparent');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(0,0,100,0,Math.PI*2); ctx.fill();
+
+  const bob = Math.sin(p.anim)*2;
+  ctx.fillStyle = '#444';
+  ctx.fillRect(-8, 5, 6, 15+bob);
+  ctx.fillRect(2, 5, 6, 15-bob);
+  ctx.fillStyle = '#a86';
+  ctx.fillRect(-10, -12, 20, 22);
+  ctx.fillStyle = '#246';
+  ctx.fillRect(-6, -10, 12, 18);
+  ctx.fillStyle = '#fdb';
+  ctx.fillRect(-8, -28, 16, 16);
+  ctx.fillStyle = '#432';
+  ctx.fillRect(-9, -30, 18, 8);
+  ctx.fillRect(p.facing>0?6:-9, -28, 4, 10);
+  ctx.fillStyle = '#d63';
+  ctx.fillRect(-2, -30, 4, 6);
+  ctx.fillStyle = '#0af';
+  ctx.fillRect(p.facing>0?2:-6, -22, 4, 3);
+  ctx.fillStyle = '#c44';
+  ctx.fillRect(p.facing>0?-8:6, -20, 2, 4);
+  ctx.fillStyle = '#fc0';
+  ctx.beginPath(); ctx.arc(p.facing*-8, 2, 4, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#ff8';
+  ctx.beginPath(); ctx.arc(p.facing*-8, 2, 2, 0, Math.PI*2); ctx.fill();
+
+  if (p.block) {
+    ctx.fillStyle = '#89a';
+    ctx.fillRect(p.facing*10, -8, 6, 20);
+    ctx.strokeStyle = '#fff';
+    ctx.strokeRect(p.facing*10, -8, 6, 20);
+  }
+  ctx.restore();
+}
+
+function drawMobs() {
+  for (const m of world.mobs) {
+    ctx.save();
+    ctx.translate(m.x, m.y);
+    if (m.flash>0) ctx.globalAlpha = 0.5;
+    const bob = Math.sin(m.anim)*2;
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.beginPath(); ctx.ellipse(0, m.h/2, m.w/2, 4, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = m.color;
+    if (m.name==='Слизень') {
+      ctx.beginPath();
+      ctx.ellipse(0, 0, m.w/2, m.h/2 + Math.sin(m.anim)*2, 0, 0, Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-4, -4, 3, 3);
+    } else if (m.name==='Паук') {
+      ctx.beginPath(); ctx.arc(0, 0, m.w/2, 0, Math.PI*2); ctx.fill();
+      ctx.strokeStyle = m.color; ctx.lineWidth = 2;
+      for (let i=0; i<8; i++) {
+        const a = (i/8)*Math.PI*2 + bob*0.1;
+        ctx.beginPath();
+        ctx.moveTo(0,0);
+        ctx.lineTo(Math.cos(a)*m.w/2, Math.sin(a)*m.h/2);
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#f00';
+      ctx.fillRect(-4, -2, 3, 3);
+      ctx.fillRect(1, -2, 3, 3);
+    } else {
+      ctx.fillRect(-m.w/2, -m.h/2 + bob, m.w, m.h);
+      ctx.fillStyle = '#f00';
+      ctx.fillRect(-4, -m.h/2+4, 3, 3);
+      ctx.fillRect(1, -m.h/2+4, 3, 3);
+    }
+    ctx.restore();
+  }
+}
+
+function drawBoss() {
+  const b = world.boss;
+  if (!b || b.dead) return;
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  if (b.flash>0) ctx.globalAlpha = 0.5;
+  const aura = ctx.createRadialGradient(0,0,0,0,0,b.w);
+  aura.addColorStop(0, 'rgba(100,150,255,0.3)');
+  aura.addColorStop(1, 'transparent');
+  ctx.fillStyle = aura;
+  ctx.beginPath(); ctx.arc(0,0,b.w,0,Math.PI*2); ctx.fill();
+
+  if (b.name==='Годзилла') {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(-b.w/2, -b.h/2, b.w, b.h);
+    ctx.fillStyle = '#3af';
+    for (let i=0; i<5; i++) {
+      const sx = -b.w/2 + 10 + i*(b.w-20)/4;
+      ctx.beginPath();
+      ctx.moveTo(sx, -b.h/2);
+      ctx.lineTo(sx+5, -b.h/2 - 20 - Math.sin(b.anim*3+i)*5);
+      ctx.lineTo(sx+10, -b.h/2);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.fillStyle = '#0ff';
+    ctx.fillRect(-20, -10, 10, 8);
+    ctx.fillRect(10, -10, 10, 8);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(-15, 10, 30, 10);
+  } else if (b.name==='Тарантул') {
+    ctx.fillStyle = '#432';
+    ctx.beginPath(); ctx.arc(0,0, b.w/2, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#432'; ctx.lineWidth = 4;
+    for (let i=0; i<8; i++) {
+      const a = (i/8)*Math.PI*2 + b.anim*0.2;
+      ctx.beginPath(); ctx.moveTo(0,0);
+      ctx.lineTo(Math.cos(a)*b.w/2, Math.sin(a)*b.h/2);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#f00';
+    for (let i=0; i<4; i++) ctx.fillRect(-15+i*8, -5, 5, 5);
+  } else if (b.name==='Кракен') {
+    ctx.fillStyle = '#123';
+    ctx.beginPath(); ctx.arc(0,0, b.w/2, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#123'; ctx.lineWidth = 6;
+    for (let i=0; i<8; i++) {
+      const a = (i/8)*Math.PI*2 + Math.sin(b.anim+i)*0.3;
+      ctx.beginPath(); ctx.moveTo(0,0);
+      ctx.quadraticCurveTo(Math.cos(a)*b.w/2, Math.sin(a)*b.h/2,
+                           Math.cos(a)*b.w, Math.sin(a)*b.h);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-15, -10, 8, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(15, -10, 8, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(-15, -10, 4, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(15, -10, 4, 0, Math.PI*2); ctx.fill();
+  } else if (b.name==='Эрен') {
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.moveTo(-b.w/2, -b.h/2);
+    ctx.lineTo(b.w/2, -b.h/2);
+    ctx.lineTo(b.w/2+10, b.h/2);
+    ctx.lineTo(-b.w/2-10, b.h/2);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#444';
+    ctx.fillRect(-b.w/2+5, -b.h/2+5, b.w-10, b.h-10);
+    ctx.strokeStyle = '#3af'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-10,-20); ctx.lineTo(0,0); ctx.lineTo(10,-15);
+    ctx.stroke();
+    ctx.fillStyle = '#0ff';
+    ctx.fillRect(-12, -15, 8, 6);
+    ctx.fillRect(4, -15, 8, 6);
+  }
+  ctx.restore();
+
+  ctx.fillStyle = '#f00';
+  ctx.fillRect(W/2-150, 20, 300, 15);
+  ctx.fillStyle = '#0f0';
+  ctx.fillRect(W/2-150, 20, 300*(b.hp/b.maxHp), 15);
+  ctx.strokeStyle = '#fff';
+  ctx.strokeRect(W/2-150, 20, 300, 15);
+}
+
+function drawParticles() {
+  for (const p of world.particles) {
+    ctx.globalAlpha = p.life/60;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x-p.size/2, p.y-p.size/2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function draw() {
+  drawBackground();
+  drawTiles();
+  drawOres();
+  drawChests();
+  drawMobs();
+  drawBoss();
+  drawPlayer();
+  drawParticles();
+}
+
+// ================== СТАРТ ==================
+genTiles();
+for (let i=0; i<5; i++) spawnMob('slime', Math.random()*W, 100+Math.random()*200);
+for (let i=0; i<3; i++) spawnMob('rat', Math.random()*W, 100+Math.random()*200);
+
+// Стартовое оружие
+addItem({cat:'weapon', name:'Меч', icon:'🗡️', rarity:'common', level:1, stat:10, upgradeCost:200, id:Math.random()});
+addItem({cat:'pick', name:'Кирка', icon:'⛏️', rarity:'common', level:1, stat:1, upgradeCost:200, id:Math.random()});
+
+document.getElementById('closeInv').onclick = toggleInventory;
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+
+c.addEventListener('mousedown', () => world.keys['mouse'] = true);
+c.addEventListener('mouseup', () => world.keys['mouse'] = false);
+</script>
+</body>
+</html>
